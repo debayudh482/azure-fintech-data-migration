@@ -1,0 +1,385 @@
+{
+    "name": "FintechProjectPipeline",
+    "properties": {
+        "activities": [
+            {
+                "name": "GetTableList",
+                "type": "Lookup",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": "SELECT \n    TABLE_SCHEMA AS SchemaName,\n    TABLE_NAME AS TableName\nFROM \n    INFORMATION_SCHEMA.TABLES\nWHERE \n    TABLE_TYPE = 'BASE TABLE' and TABLE_SCHEMA = 'fintech'\nORDER BY \n    SchemaName, TableName;",
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "SourceSQLTableConn",
+                        "type": "DatasetReference"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "ItterateOnEachTable",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "GetTableList",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('GetTableList').output.value",
+                        "type": "Expression"
+                    },
+                    "activities": [
+                        {
+                            "name": "SQLDBtoBronzeLayerCpy",
+                            "type": "Copy",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "@concat('SELECT * FROM ',item().SchemaName,'.',item().TableName)",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "sink": {
+                                    "type": "ParquetSink",
+                                    "storeSettings": {
+                                        "type": "AzureBlobFSWriteSettings"
+                                    },
+                                    "formatSettings": {
+                                        "type": "ParquetWriteSettings"
+                                    }
+                                },
+                                "enableStaging": false,
+                                "translator": {
+                                    "type": "TabularTranslator",
+                                    "typeConversion": true,
+                                    "typeConversionSettings": {
+                                        "allowDataTruncation": true,
+                                        "treatBooleanAsNumber": false
+                                    }
+                                }
+                            },
+                            "inputs": [
+                                {
+                                    "referenceName": "SourceSQLTableConn",
+                                    "type": "DatasetReference"
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "referenceName": "TargetTableConn",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "schemaname": {
+                                            "value": "@item().SchemaName",
+                                            "type": "Expression"
+                                        },
+                                        "tablename": {
+                                            "value": "@item().TableName",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "name": "SourceCount",
+                            "type": "Lookup",
+                            "dependsOn": [
+                                {
+                                    "activity": "SQLDBtoBronzeLayerCpy",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "@concat('SELECT COUNT(*) as src_count FROM ',item().SchemaName, '.',item().TableName)",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "SourceSQLTableConn",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        },
+                        {
+                            "name": "BronzeRecordCount",
+                            "type": "Script",
+                            "dependsOn": [
+                                {
+                                    "activity": "SQLDBtoBronzeLayerCpy",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "linkedServiceName": {
+                                "referenceName": "SynapseSQLServerlessConn",
+                                "type": "LinkedServiceReference"
+                            },
+                            "typeProperties": {
+                                "scripts": [
+                                    {
+                                        "type": "Query",
+                                        "text": {
+                                            "value": "SELECT COUNT(*) AS tgt_count\nFROM OPENROWSET(\n    BULK 'bronze/@{item().SchemaName}/@{item().TableName}/*.parquet',\n    DATA_SOURCE = 'FintechDataExternal',\n    FORMAT = 'PARQUET'\n) AS rows;",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                ],
+                                "scriptBlockExecutionTimeout": "02:00:00"
+                            }
+                        },
+                        {
+                            "name": "CountCheck",
+                            "type": "IfCondition",
+                            "dependsOn": [
+                                {
+                                    "activity": "SourceCount",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                },
+                                {
+                                    "activity": "BronzeRecordCount",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "expression": {
+                                    "value": "@equals(\n    int(string(activity('SourceCount').output.firstRow.src_count)),\n    int(string(activity('BronzeRecordCount').output.resultSets[0].rows[0].tgt_count)))",
+                                    "type": "Expression"
+                                },
+                                "ifFalseActivities": [
+                                    {
+                                        "name": "Fail1",
+                                        "type": "Fail",
+                                        "dependsOn": [],
+                                        "userProperties": [],
+                                        "typeProperties": {
+                                            "message": "sql source table match their bronze layer data count",
+                                            "errorCode": "408"
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "BronzeToSilver",
+                "type": "SynapseNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "ItterateOnEachTable",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebook": {
+                        "referenceName": "BronzeToSilver",
+                        "type": "NotebookReference"
+                    },
+                    "snapshot": true,
+                    "sparkPool": {
+                        "referenceName": "fintechspark",
+                        "type": "BigDataPoolReference"
+                    },
+                    "executorSize": "Small",
+                    "driverSize": "Small"
+                }
+            },
+            {
+                "name": "SilverToGold",
+                "type": "SynapseNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "BronzeToSilver",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebook": {
+                        "referenceName": "silverToGold",
+                        "type": "NotebookReference"
+                    },
+                    "snapshot": true,
+                    "sparkPool": {
+                        "referenceName": "fintechspark",
+                        "type": "BigDataPoolReference"
+                    },
+                    "executorSize": "Small",
+                    "driverSize": "Small"
+                }
+            },
+            {
+                "name": "SuccessEmail",
+                "type": "WebActivity",
+                "dependsOn": [
+                    {
+                        "activity": "SilverToGold",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "url": "https://prod-29.westus3.logic.azure.com:443/workflows/d96b396690f5484d8d834606b2eb88cf/triggers/When_an_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=CEZ7V7ZFt1d8foCHNr5Z1yQEZjFwsPlfI-NZZF2RJ8c",
+                    "connectVia": {
+                        "referenceName": "AutoResolveIntegrationRuntime",
+                        "type": "IntegrationRuntimeReference"
+                    },
+                    "body": {
+                        "value": "{\n    \"to\":\"@{pipeline().parameters.to}\",\n    \"subject\":\"@{pipeline().parameters.SubjectForSuccess}\",\n    \"emailmsg\":\"@{pipeline().parameters.emailMsgSuccess}\"\n}",
+                        "type": "Expression"
+                    }
+                }
+            },
+            {
+                "name": "FailureEmail",
+                "type": "WebActivity",
+                "dependsOn": [
+                    {
+                        "activity": "SilverToGold",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "url": "https://prod-29.westus3.logic.azure.com:443/workflows/d96b396690f5484d8d834606b2eb88cf/triggers/When_an_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=CEZ7V7ZFt1d8foCHNr5Z1yQEZjFwsPlfI-NZZF2RJ8c",
+                    "connectVia": {
+                        "referenceName": "AutoResolveIntegrationRuntime",
+                        "type": "IntegrationRuntimeReference"
+                    },
+                    "body": {
+                        "value": "{\n    \"to\":\"@{pipeline().parameters.to}\",\n    \"subject\":\"@{pipeline().parameters.subjectforFailure}\",\n    \"emailmsg\":\"@{pipeline().parameters.emailmsgforFaliure}\"\n}",
+                        "type": "Expression"
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "to": {
+                "type": "string",
+                "defaultValue": "debayudh2021@gmail.com"
+            },
+            "SubjectForSuccess": {
+                "type": "string",
+                "defaultValue": "Fintech data pipeline Execution Success"
+            },
+            "emailMsgSuccess": {
+                "type": "string",
+                "defaultValue": "Todays Execution For Fintech data pipeline is succesful"
+            },
+            "subjectforFailure": {
+                "type": "string",
+                "defaultValue": "Fintech data pipeline Execution Failed"
+            },
+            "emailmsgforFaliure": {
+                "type": "string",
+                "defaultValue": "Todays Fintech Data Pipieline Execution Failed"
+            }
+        },
+        "annotations": []
+    }
+}
